@@ -5,7 +5,8 @@ module HaskCons
   , pair
   , parse
   , parserOutputCType, CType(..)
-  , formatCType
+  , formatCType, declsCType
+  -- , parserCode
   , id, (.)
   ) where
 
@@ -74,7 +75,7 @@ parse Unsigned Word32 = fromIntegral <$> getWord32le
 parse Unsigned Word64 = fromIntegral <$> getWord64le
 parse (IgnoreInput parser) _ = parse parser ()
 
-data CType = Void | Primitive (String -> String) | TypeProduct CType CType | CDoc String CType
+data CType = Void | Primitive (String -> String) | TypeProduct String CType CType | CDoc String CType
 
 atomicCType :: String -> CType
 atomicCType typeName = Primitive mkDecl
@@ -89,10 +90,10 @@ atomicCType typeName = Primitive mkDecl
 
 -- TODO: CType can be a GADT with tuples for products, to avoid the
 -- runtime error here
-onTypeProduct :: (CType -> CType -> CType) -> CType -> CType
-onTypeProduct _ Void = Void
+onTypeProduct :: (CType -> CType -> a) -> CType -> a
+onTypeProduct _ Void = error "Expecting a TypeProduct!"
 onTypeProduct _ (Primitive _) = error "Expecting a TypeProduct!"
-onTypeProduct f (TypeProduct x y) = f x y
+onTypeProduct f (TypeProduct _name x y) = f x y
 onTypeProduct f (CDoc _ inner) = onTypeProduct f inner
 
 typeProductFst :: CType -> CType
@@ -101,19 +102,29 @@ typeProductFst = onTypeProduct const
 typeProductSnd :: CType -> CType
 typeProductSnd = onTypeProduct (flip const)
 
-parserMakerOutputCType :: ParserMaker i o -> CType -> CType
-parserMakerOutputCType Id i = i
-parserMakerOutputCType (Dot after before) i = parserMakerOutputCType after $ parserMakerOutputCType before i
-parserMakerOutputCType Split i = TypeProduct i i
+mkTypeProduct :: CType -> CType -> NameGen CType
+mkTypeProduct x y = do
+  name <- mkName
+  pure $ TypeProduct name x y
+
+parserMakerOutputCType :: ParserMaker i o -> CType -> NameGen CType
+parserMakerOutputCType Id i = pure i
+parserMakerOutputCType (Dot after before) i =
+  parserMakerOutputCType after =<< parserMakerOutputCType before i
+parserMakerOutputCType Split i = mkTypeProduct i i
 parserMakerOutputCType (Vertical one two) i =
-  TypeProduct
-  (parserMakerOutputCType one (typeProductFst i))
-  (parserMakerOutputCType two (typeProductSnd i))
-parserMakerOutputCType Bytes _ = atomicCType "char *"
-parserMakerOutputCType (PureIntSize _) _ = atomicCType "uint8_t"
-parserMakerOutputCType Unsigned _ = atomicCType "uint64_t" -- dynamic int size
-parserMakerOutputCType (Doc d parser) i = CDoc d $ parserMakerOutputCType parser i
-parserMakerOutputCType (IgnoreInput parser) _ = parserOutputCType parser
+  join $
+  mkTypeProduct
+  <$> parserMakerOutputCType one (typeProductFst i)
+  <*> parserMakerOutputCType two (typeProductSnd i)
+parserMakerOutputCType Bytes _ = pure $ atomicCType "char *"
+parserMakerOutputCType (PureIntSize _) _ = pure $ atomicCType "uint8_t"
+parserMakerOutputCType Unsigned _ = pure $ atomicCType "uint64_t" -- dynamic int size
+parserMakerOutputCType (Doc d parser) i = CDoc d <$> parserMakerOutputCType parser i
+parserMakerOutputCType (IgnoreInput parser) _ = parserMakerOutputCType parser Void
+
+parserOutputCType :: Parser a -> CType
+parserOutputCType = runNameGen . (`parserMakerOutputCType` Void)
 
 type NameGen = State Int
 
@@ -123,35 +134,60 @@ runNameGen = (`evalState` 0)
 mkName :: NameGen String
 mkName = modify (+1) >> ("var" ++) . show <$> get
 
+-- data Plan a = Plan
+--   { planCode :: [String]
+--   , planValName :: String
+--   , planValType :: CType
+--   }
+
 -- parserMakerPlan :: ParserMaker a b -> Plan a -> NameGen (Plan b)
--- parserMakerPlan Id i = i
+-- parserMakerPlan Id i = pure i
 -- parserMakerPlan (Dot after before) i = parserMakerPlan after =<< parserMakerPlan before i
--- parserMakerPlan Split (Plan code valName) = do
---   ("typedef " ++) <$> parserMakerOutputCType
---   Plan (mkTypeDef  ++ code)
---   i ++ [xx]
--- parserMakerPlan   Vertical :: ParserMaker i0 o0 -> ParserMaker i1 o1 -> ParserMaker (i0, i1) (o0, o1)
--- parserMakerPlan   Bytes :: ParserMaker Int64 LBS.ByteString
--- parserMakerPlan   Doc :: String -> ParserMaker a b -> ParserMaker a b
--- parserMakerPlan   PureIntSize :: IntSize -> Parser IntSize
--- parserMakerPlan   Unsigned :: Integral a => ParserMaker IntSize a
--- parserMakerPlan   IgnoreInput :: Parser b -> ParserMaker a b
+-- parserMakerPlan Split (Plan code valName valType) = do
+--   resTypeName <- ("struct split_"++) <$> mkName
+--   resValName <- mkName
+--   let
+--     myCode =
+--       [ resTypeName ++ " {"
+--       , "  " ++ formatCType valType "fst"
+--       , "  " ++ formatCType valType "snd"
+--       , "} " ++ resValName ++ " = {" ++ valName ++ ", " ++ valName ++ "};"
+--       ]
+--   pure Plan
+--     { planCode = code ++ myCode
+--     , planValName = resValName
+--     , planValType = resTypeName
+--     }
+-- -- parserMakerPlan (Vertical a b) i = do
+-- --   parserMakerPlan a $ planFst i
+-- --   parserMakerPlan b
+-- --   pure Plan
+-- --     { planCode
+-- -- parserMakerPlan   Bytes :: ParserMaker Int64 LBS.ByteString
+-- -- parserMakerPlan   Doc :: String -> ParserMaker a b -> ParserMaker a b
+-- -- parserMakerPlan   PureIntSize :: IntSize -> Parser IntSize
+-- -- parserMakerPlan   Unsigned :: Integral a => ParserMaker IntSize a
+-- -- parserMakerPlan   IgnoreInput :: Parser b -> ParserMaker a b
 
-parserOutputCType :: Parser a -> CType
-parserOutputCType = flip parserMakerOutputCType Void
+-- voidPlan :: Plan ()
+-- voidPlan = Plan [] "should-never-appear-in-code" "should-never-appear-in-code"
 
-formatCTypeS :: CType -> NameGen String
-formatCTypeS (CDoc d x) = (++ ("/* " ++ d ++ " */")) <$> formatCTypeS x
-formatCTypeS Void = pure "{}"
-formatCTypeS (Primitive mkDecl) = (++ ";") . mkDecl <$> mkName
-formatCTypeS (TypeProduct a b) = do
-  name <- mkName
-  children <- mapM formatCTypeS [a, b]
-  pure . unlines $ concat
-    [ [ "struct {" ]
-    , map ("  " ++) children
-    , [ "} " ++ name ++ ";" ]
-    ]
+-- parserCode :: Parser a -> String
+-- parserCode parser = unlines . planCode . runNameGen $ parserMakerPlan parser voidPlan
 
-formatCType :: CType -> String
-formatCType = runNameGen . formatCTypeS
+formatCType :: CType -> String -> String
+formatCType (CDoc d x) name = (++ (" /* " ++ d ++ " */")) $ formatCType x name
+formatCType Void name = "void " ++ name
+formatCType (Primitive mkDecl) name = (++ ";") $ mkDecl name
+formatCType (TypeProduct productName _ _) name = "struct " ++ productName ++ " " ++ name
+
+declsCType :: CType -> [String]
+declsCType (CDoc d x) = ("/* " ++ d ++ " */") : declsCType x
+declsCType Void = []
+declsCType (Primitive _) = []
+declsCType (TypeProduct productName a b) =
+  [ "struct " ++ productName ++ " {"
+  , "  " ++ formatCType a "fst"
+  , "  " ++ formatCType b "snd"
+  , "};"
+  ]

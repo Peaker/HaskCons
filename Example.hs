@@ -21,4 +21,5 @@ main = do
   putStrLn ""
   print . runGet (parse tlvP ()) $ LBS.pack [1, 0, 6] <> "Hello!"
   putStrLn ""
-  putStrLn . formatCType $ parserOutputCType tlvP
+  putStrLn . unlines $ declsCType (parserOutputCType tlvP)
+  putStrLn $ formatCType (parserOutputCType tlvP) "tlv_t" ++ ";"
