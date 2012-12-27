@@ -19,7 +19,12 @@ tlvP = typeP `pair` lenValP
 main :: IO ()
 main = do
   putStrLn ""
+  putStrLn "== Parsing directly from Haskell"
   print . runGet (parse tlvP ()) $ LBS.pack [1, 0, 6] <> "Hello!"
   putStrLn ""
+  putStrLn "== Declaring the output type in C"
   putStrLn . unlines $ declsCType (parserOutputCType tlvP)
-  putStrLn $ formatCType (parserOutputCType tlvP) "tlv_t" ++ ";"
+  putStrLn $ formatCType (parserOutputCType tlvP) "tlv" ++ ";"
+  putStrLn ""
+  putStrLn "== The parser code:"
+  putStrLn . snd $ parserCode tlvP
