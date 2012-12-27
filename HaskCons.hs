@@ -1,11 +1,8 @@
 {-# LANGUAGE GADTs, KindSignatures #-}
 module HaskCons
   ( IntSize(..), ParserMaker, Parser
-  , doc, bytes, unsigned, ignoreInput, (***), (&&&)
-  , pair
+  , doc, bytes, unsigned, ignoreInput, pair, (***), (&&&)
   , parse
-  , parserOutputCType, CType(..)
-  , formatCType, declsCType
   , parserCode, Plan(..)
   , id, (.)
   ) where
@@ -123,25 +120,6 @@ mkTypeProduct x y = do
 bytestringCType :: CType
 bytestringCType =
   TypeProduct "bytestring" ("length", atomicCType "size_t") ("str", atomicCType "char *")
-
-parserMakerOutputCType :: ParserMaker i o -> CType -> NameGen CType
-parserMakerOutputCType Id i = pure i
-parserMakerOutputCType (Dot after before) i =
-  parserMakerOutputCType after =<< parserMakerOutputCType before i
-parserMakerOutputCType Split i = mkTypeProduct ("split0", i) ("split1", i)
-parserMakerOutputCType (Vertical one two) i =
-  join $
-  mkTypeProduct
-  <$> ((,) "fst" <$> parserMakerOutputCType one (snd (typeProductFst i)))
-  <*> ((,) "snd" <$> parserMakerOutputCType two (snd (typeProductSnd i)))
-parserMakerOutputCType Bytes _ = pure bytestringCType
-parserMakerOutputCType (PureIntSize _) _ = pure $ atomicCType "uint8_t"
-parserMakerOutputCType Unsigned _ = pure $ atomicCType "uint64_t" -- dynamic int size
-parserMakerOutputCType (Doc d parser) i = CDoc d <$> parserMakerOutputCType parser i
-parserMakerOutputCType (IgnoreInput parser) _ = parserMakerOutputCType parser Void
-
-parserOutputCType :: Parser a -> CType
-parserOutputCType = runNameGen . (`parserMakerOutputCType` Void)
 
 type NameGen = State Int
 
