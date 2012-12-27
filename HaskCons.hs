@@ -78,7 +78,11 @@ parse Unsigned Word32 = fromIntegral <$> getWord32le
 parse Unsigned Word64 = fromIntegral <$> getWord64le
 parse (IgnoreInput parser) _ = parse parser ()
 
-data CType = Void | Primitive (String -> String) | TypeProduct String CType CType | CDoc String CType
+data CType
+  = Void
+  | Primitive (String -> String)
+  | TypeProduct String (String, CType) (String, CType)
+  | CDoc String CType
 
 atomicCType :: String -> CType
 atomicCType typeName = Primitive mkDecl
@@ -99,35 +103,38 @@ intSizeToInt Word64 = 8
 
 -- TODO: CType can be a GADT with tuples for products, to avoid the
 -- runtime error here
-onTypeProduct :: (CType -> CType -> a) -> CType -> a
+onTypeProduct :: ((String, CType) -> (String, CType) -> a) -> CType -> a
 onTypeProduct _ Void = error "Expecting a TypeProduct!"
 onTypeProduct _ (Primitive _) = error "Expecting a TypeProduct!"
 onTypeProduct f (TypeProduct _name x y) = f x y
 onTypeProduct f (CDoc _ inner) = onTypeProduct f inner
 
-typeProductFst :: CType -> CType
+typeProductFst :: CType -> (String, CType)
 typeProductFst = onTypeProduct const
 
-typeProductSnd :: CType -> CType
+typeProductSnd :: CType -> (String, CType)
 typeProductSnd = onTypeProduct (flip const)
 
-mkTypeProduct :: CType -> CType -> NameGen CType
+mkTypeProduct :: (String, CType) -> (String, CType) -> NameGen CType
 mkTypeProduct x y = do
   name <- mkName "s_"
   pure $ TypeProduct name x y
+
+bytestringCType :: CType
+bytestringCType =
+  TypeProduct "bytestring" ("length", atomicCType "size_t") ("str", atomicCType "char *")
 
 parserMakerOutputCType :: ParserMaker i o -> CType -> NameGen CType
 parserMakerOutputCType Id i = pure i
 parserMakerOutputCType (Dot after before) i =
   parserMakerOutputCType after =<< parserMakerOutputCType before i
-parserMakerOutputCType Split i = mkTypeProduct i i
+parserMakerOutputCType Split i = mkTypeProduct ("split0", i) ("split1", i)
 parserMakerOutputCType (Vertical one two) i =
   join $
   mkTypeProduct
-  <$> parserMakerOutputCType one (typeProductFst i)
-  <*> parserMakerOutputCType two (typeProductSnd i)
-parserMakerOutputCType Bytes _ =
-  mkTypeProduct (atomicCType "size_t") (atomicCType "char *")
+  <$> ((,) "fst" <$> parserMakerOutputCType one (snd (typeProductFst i)))
+  <*> ((,) "snd" <$> parserMakerOutputCType two (snd (typeProductSnd i)))
+parserMakerOutputCType Bytes _ = pure bytestringCType
 parserMakerOutputCType (PureIntSize _) _ = pure $ atomicCType "uint8_t"
 parserMakerOutputCType Unsigned _ = pure $ atomicCType "uint64_t" -- dynamic int size
 parserMakerOutputCType (Doc d parser) i = CDoc d <$> parserMakerOutputCType parser i
@@ -149,18 +156,20 @@ data Plan = Plan
   , planType :: CType
   }
 
-planInProduct :: String -> (CType -> CType) -> Plan -> Plan
-planInProduct attr typInProduct (Plan valName typ) =
+planInProduct :: (CType -> (String, CType)) -> Plan -> Plan
+planInProduct productAttr (Plan valName typ) =
   Plan
-    { planValName = valName ++ "." ++ attr
-    , planType = typInProduct typ
+    { planValName = valName ++ "." ++ attrName
+    , planType = attrTyp
     }
+  where
+    (attrName, attrTyp) = productAttr typ
 
 planFst :: Plan -> Plan
-planFst = planInProduct "fst" typeProductFst
+planFst = planInProduct typeProductFst
 
 planSnd :: Plan -> Plan
-planSnd = planInProduct "snd" typeProductSnd
+planSnd = planInProduct typeProductSnd
 
 forwardInputStream :: [Char] -> [[Char]]
 forwardInputStream howMuch =
@@ -168,7 +177,7 @@ forwardInputStream howMuch =
   , "bytesLeft -= " ++ howMuch ++ ";"
   ]
 
-tellMkTypeProduct :: CType -> CType -> WriterT [String] NameGen CType
+tellMkTypeProduct :: (String, CType) -> (String, CType) -> WriterT [String] NameGen CType
 tellMkTypeProduct x y = do
   tp <- lift $ mkTypeProduct x y
   tell $ declsCType tp
@@ -178,7 +187,7 @@ parserMakerPlan :: ParserMaker a b -> Plan -> WriterT [String] NameGen Plan
 parserMakerPlan Id i = pure i
 parserMakerPlan (Dot after before) i = parserMakerPlan after =<< parserMakerPlan before i
 parserMakerPlan Split (Plan valName typ) = do
-  resType <- tellMkTypeProduct typ typ
+  resType <- tellMkTypeProduct ("split0", typ) ("split1", typ)
   resValName <- lift $ mkName "val"
   tell [ formatCType resType resValName ++ " = {" ++ valName ++ ", " ++ valName ++ "};" ]
   pure Plan
@@ -188,7 +197,7 @@ parserMakerPlan Split (Plan valName typ) = do
 parserMakerPlan (Vertical a b) i = do
   Plan aValName aType <- parserMakerPlan a $ planFst i
   Plan bValName bType <- parserMakerPlan b $ planSnd i
-  resType <- tellMkTypeProduct aType bType
+  resType <- tellMkTypeProduct ("fst", aType) ("snd", bType)
   resValName <- lift $ mkName "val"
   tell [ formatCType resType resValName ++ " = {" ++ aValName ++ ", " ++ bValName ++ "};" ]
   pure Plan
@@ -196,15 +205,14 @@ parserMakerPlan (Vertical a b) i = do
     , planType = resType
     }
 parserMakerPlan Bytes (Plan valName _) = do
-  resType <- tellMkTypeProduct (atomicCType "size_t") (atomicCType "char *")
   resName <- lift $ mkName "val"
   tell $
     [ "if (bytesLeft < " ++ valName ++ ") return -1;"
-    , formatCType resType resName ++ " = { " ++ valName ++ ", inputStream };"
+    , formatCType bytestringCType resName ++ " = { " ++ valName ++ ", inputStream };"
     ] ++ forwardInputStream valName
   pure Plan
     { planValName = resName
-    , planType = resType
+    , planType = bytestringCType
     }
 parserMakerPlan (Doc s parser) i =
   tell ["/* {{{ " ++ s ++ " */"] *>
@@ -253,9 +261,9 @@ declsCType :: CType -> [String]
 declsCType (CDoc d x) = ("/* " ++ d ++ " */") : declsCType x
 declsCType Void = []
 declsCType (Primitive _) = []
-declsCType (TypeProduct productName a b) =
+declsCType (TypeProduct productName (aname, a) (bname, b)) =
   [ "struct " ++ productName ++ " {"
-  , "  " ++ formatCType a "fst" ++ ";"
-  , "  " ++ formatCType b "snd" ++ ";"
+  , "  " ++ formatCType a aname ++ ";"
+  , "  " ++ formatCType b bname ++ ";"
   , "};"
   ]
